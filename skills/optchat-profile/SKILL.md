@@ -16,13 +16,19 @@ memory (summary tree), `AGENTS.md` instructions, and model config.
    ```sh
    optchat-new-profile <name>
    ```
-   The script is on PATH (`~/.local/bin/optchat-new-profile`). It writes
-   `config.json` (schema-valid: main/compactor/subagent pinned to the working
-   local model `local-vllm1/Qwen3.8-27B-FP8`, thinking `medium`; overridable via
-   `OPTCHAT_PROVIDER` / `OPTCHAT_MODEL` / `OPTCHAT_THINKING`) plus a default
-   `AGENTS.md`. If it prints "already exists", the profile is from before — skip
-   creation, go to step 2. Never hand-write `config.json` with cat/mkdir only;
-   the script guarantees the layout `loadConfig` expects.
+   The script is on PATH (installed by `install.sh`; `$PI_CODING_AGENT_DIR/bin` when that
+   is on PATH, else `~/.local/bin`). It resolves the model automatically — the current Pi
+   session's model when run inside Pi (`PI_PROVIDER`/`PI_MODEL`, the strongest signal),
+   else the agent dir's `settings.json` default or `models.json` entries, with a liveness
+   probe that skips models not actually served — so run it from inside a Pi session
+   (e.g. via the bash tool) whenever possible. Override with `--provider P --model M`
+   (or `OPTCHAT_PROVIDER`/`OPTCHAT_MODEL` env). It writes a schema-valid `config.json`
+   (main/compactor/subagent pinned, thinking `medium`) plus a default `AGENTS.md`.
+   If it prints "already exists": an unused profile can be reconfigured with a rerun
+   adding `--force` (this also fixes a profile whose pinned model is wrong, e.g. created
+   on a different machine); a profile with memory is never touched. Never hand-write
+   `config.json` with cat/mkdir only; the script guarantees the layout `loadConfig`
+   expects.
 
 2. **Switch to it.** The current session cannot be rebound — pi-optchat binds a
    session to a profile only at session start, and only while the session is
@@ -44,9 +50,11 @@ memory (summary tree), `AGENTS.md` instructions, and model config.
 
 - **spawn_session unavailable/failed**: tell the user to open a new session and
   send `/optchat profile <name>` as its first message.
-- **Model 404 in the new session** (the global default `ampere/jakeatx/...GGUF`
-  does not exist): pick `local-vllm1/Qwen3.8-27B-FP8` via `/model`. The profile's
-  pinned `main` config usually restores it on its own.
+- **Model 404 in the new session** (global default points at a model that isn't served):
+  pick a working model via `/model` in that session. The profile's pinned `main` config
+  usually restores it on its own; if the pin itself is wrong (profile created on another
+  machine or by an older script), re-run `optchat-new-profile <name> --force` from inside
+  a Pi session so it re-pins to the model you're actually using.
 - **Headless one-shot use**: `pi -p --optchat-profile <name> "message"`.
 - **List profiles**: `ls ~/.optchat/profiles`
 - **Delete a profile**: `rm -rf ~/.optchat/profiles/<name>` (only while no Pi has

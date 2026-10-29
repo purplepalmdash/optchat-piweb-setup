@@ -8,9 +8,11 @@ starts from a bounded summary-tree view of everything so far, and the profile pe
 across Pi sessions and directories. This repository adds:
 
 - a **profile creation script** (`optchat-new-profile`) — needed because in non-TUI hosts
-  (Pi Web) `/optchat profile <name>` can only *open* an existing profile, never create one;
-- a **model-pinned config** — profile configs that pin `main`/`compactor`/`subagent` to a
-  working model, so profiles survive a broken Pi global default;
+  (Pi Web) `/optchat profile <name>` can only *open* an existing profile, never create one.
+  It **auto-detects a model that actually works on the target machine** (current Pi session
+  model → agent-dir `settings.json` default → `models.json` entries, with a liveness probe
+  that skips models the local server is not serving) and pins `main`/`compactor`/`subagent`
+  to it, so profiles survive a broken Pi global default;
 - an **agent skill + global AGENTS.md snippet** — so an agent in any session can create a
   profile and switch to it when the user just says "create a new optchat profile xxx".
 
@@ -32,9 +34,9 @@ Audience: a human, or the machine's coding agent (follow the steps in order).
 | A Pi Web instance running (the thing that hosts web sessions) | your web UI is up |
 | A working model: an API provider logged in via `pi`, or a local vLLM entry in `~/.pi/agent/models.json` | ask Pi for its models |
 
-Note down the provider id and model id of a model you know works, e.g.
-`local-vllm1` / `/home/dash/models/Qwen3.8-27B-FP8`. Everything below defaults to that pair;
-override with `OPTCHAT_PROVIDER` / `OPTCHAT_MODEL` / `OPTCHAT_THINKING` for yours.
+Note: the script resolves the model by itself (see step 3). If you want to force one,
+export `OPTCHAT_PROVIDER` / `OPTCHAT_MODEL` (and optionally `OPTCHAT_THINKING`) for the
+run, or pass `--provider` / `--model`.
 
 ### 1. Install pi-optchat
 
@@ -68,9 +70,22 @@ optchat-new-profile work
 
 creates `~/.optchat/profiles/work/` with:
 - `config.json` — recipe defaults, with `main` / `compactor` / `subagent` pinned to the
-  local model, so the profile opens and summarizes correctly even if Pi's global default
-  model is broken;
+  resolved model, so the profile opens and summarizes correctly even if Pi's global
+  default model is broken. Resolution order: explicit `--provider`/`--model` (or
+  `OPTCHAT_PROVIDER`/`OPTCHAT_MODEL`) → the current Pi session's model when the script
+  runs inside Pi (`PI_PROVIDER`/`PI_MODEL` — run it from your agent's shell so this
+  applies) → `settings.json` `defaultProvider`/`defaultModel` → the first model of each
+  provider in `models.json`. Every candidate is checked: it must exist in `models.json`,
+  and providers with an http(s) `baseUrl` get a 3-second `GET {baseUrl}/models` probe —
+  candidates whose model is not actually served are skipped (which is exactly how a
+  dangling global default, such as a GGUF model the vLLM box no longer hosts, is avoided).
+  The chosen source is printed (`— current pi session model`, `— settings.json default
+  (probed: served)`, `— explicit`, …).
 - `AGENTS.md` — profile instructions (edit freely; applies from the next turn).
+
+`optchat-new-profile <name> --force` reconfigures an existing profile that has no memory
+yet — the way to fix a profile whose pinned model is wrong (e.g. created on a different
+machine, or by an older version of this script). A profile with memory is never touched.
 
 Alternative: open an interactive TUI Pi window and use the profile picker's
 **+ Create profile** — but in a pure Pi Web environment the script above is the way.
@@ -125,6 +140,9 @@ Rules to know:
   a model that doesn't exist): pick a working model via `/model` in that session, or make
   sure the profile's `config.json` has a valid `main` pin. The pin is restored whenever the
   profile opens (unless a `--model`/`--provider` flag overrides it for that run).
+- **Profile pinned to a model that doesn't exist on this machine** (created on another
+  machine, or by an older version of the script): `optchat-new-profile <name> --force`
+  re-pins it with a working model — safe while the profile has no memory yet.
 - **"Profile already running"**: another Pi holds it. Either wait, close that Pi, or let the
   second window join as a connected subagent window.
 - **Stale lock after a crash**: start Pi again — sockets that no longer answer are removed

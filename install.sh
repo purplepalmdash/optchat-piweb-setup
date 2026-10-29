@@ -7,9 +7,7 @@
 # Environment overrides:
 #   PI_CODING_AGENT_DIR   agent dir      (default ~/.pi/agent)
 #   OPTCHAT_SKILLS_DIR    skills dir     (default ~/.agents/skills)
-#   OPTCHAT_PROVIDER      default provider for new profiles (default local-vllm1)
-#   OPTCHAT_MODEL         default model id for new profiles (default /home/dash/models/Qwen3.8-27B-FP8)
-#   OPTCHAT_THINKING      default thinking level (default medium)
+#   OPTCHAT_PROVIDER/MODEL/THINKING  model pinning for new profiles (default: auto-detected by the script)
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,71 +1,156 @@
-#!/usr/bin/env bash
-# Create a new pi-optchat profile wired to this machine's working local model.
-#
-# Usage: optchat-new-profile <name>
-#   name: 1-64 chars, lowercase letters/digits/-/_, starting with a letter/digit
-#
-# Environment overrides (defaults match the local vLLM on this machine):
-#   OPTCHAT_HOME     profile root            (default ~/.optchat)
-#   OPTCHAT_PROVIDER provider id             (default local-vllm1)
-#   OPTCHAT_MODEL    model id                (default /home/dash/models/Qwen3.8-27B-FP8)
-#   OPTCHAT_THINKING thinking level          (default medium)
-#
-# Writes <root>/profiles/<name>/config.json and AGENTS.md with the same layout
-# pi-optchat's own createProfile() uses, then pins main/compactor/subagent to
-# the local model so the profile works without a Pi model selection.
-set -euo pipefail
+#!/usr/bin/env node
+// optchat-new-profile — create a pi-optchat profile with a model-pinned config.
+//
+// Usage: optchat-new-profile <name> [options]
+//   --provider <id>   pin this provider (requires --model)
+//   --model <id>      pin this model id (requires --provider)
+//   --thinking <lvl>  off|minimal|low|medium|high|xhigh|max (default: medium)
+//   --force           overwrite config of an existing profile that has no memory yet
+//
+// Env overrides (same precedence as the flags):
+//   OPTCHAT_HOME      profile root               (default ~/.optchat)
+//   OPTCHAT_PROVIDER  provider id
+//   OPTCHAT_MODEL     model id
+//   OPTCHAT_THINKING  thinking level
+//
+// Model resolution (when not given explicitly), in order:
+//   1. the current Pi session's model (PI_PROVIDER/PI_MODEL env — only set inside Pi, and
+//      the strongest signal: it is the model you are actually chatting with right now),
+//   2. the agent dir's settings.json defaultProvider/defaultModel,
+//   3. then every provider/model listed in models.json, in file order.
+// Candidates from 2./3. are filtered: unknown provider+model pairs are rejected, providers
+// with a http(s) baseUrl get a 3s liveness probe (GET {baseUrl}/models) and are skipped when
+// the model is not actually served (probed-served wins over unprobeable), and built-in
+// providers need a login (auth.json or env key).
+//
+// Writes <root>/profiles/<name>/{config.json,AGENTS.md} — the same layout pi-optchat's
+// createProfile() uses — with main/compactor/subagent pinned to the resolved model, so the
+// profile opens and summarizes correctly even if Pi's global default model is broken.
 
-OPTCHAT_HOME="${OPTCHAT_HOME:-$HOME/.optchat}"
-PROVIDER="${OPTCHAT_PROVIDER:-local-vllm1}"
-MODEL_ID="${OPTCHAT_MODEL:-/home/dash/models/Qwen3.8-27B-FP8}"
-THINKING="${OPTCHAT_THINKING:-medium}"
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync, closeSync, fsyncSync, renameSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
-name="${1:-}"
-if [[ -z "$name" ]]; then
-  echo "usage: optchat-new-profile <name>" >&2
-  exit 2
-fi
-if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
-  echo "invalid profile name: $name (1-64 lowercase letters, digits, - or _, starting with a letter or digit)" >&2
-  exit 2
-fi
-if [[ "$PROVIDER" == *\"* || "$MODEL_ID" == *\"* || "$THINKING" == *\"* ]]; then
-  echo "provider/model/thinking must not contain double quotes" >&2
-  exit 2
-fi
+const THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const ENV_KEYS = { anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY', google: 'GEMINI_API_KEY', groq: 'GROQ_API_KEY', mistral: 'MISTRAL_API_KEY', xai: 'XAI_API_KEY' };
+const notes = [];
+const note = (s) => { notes.push(s); console.error(`note: ${s}`); };
 
-dir="$OPTCHAT_HOME/profiles/$name"
-if [[ -e "$dir" ]]; then
-  echo "profile already exists: $name ($dir)" >&2
-  exit 1
-fi
-
-[[ -d "$OPTCHAT_HOME" ]] || mkdir -m 700 -p "$OPTCHAT_HOME"
-[[ -d "$OPTCHAT_HOME/profiles" ]] || mkdir -m 700 "$OPTCHAT_HOME/profiles"
-mkdir -m 700 "$dir"
-
-cat > "$dir/config.json" <<EOF
-{
-  "compactor": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" },
-  "subagent": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" },
-  "subagentLevels": 1,
-  "maxAgents": 8,
-  "groupReports": false,
-  "previousExchange": true,
-  "previousExchangeKB": 16,
-  "memorySearch": false,
-  "summaryAcceptBytes": 640,
-  "jobs": 8,
-  "refreshAt": 0.3,
-  "main": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" }
+// ---- args -------------------------------------------------------------------
+const args = process.argv.slice(2);
+let name, force = false;
+const flags = {};
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--force') force = true;
+  else if (a === '--provider' || a === '--model' || a === '--thinking') flags[a.slice(2)] = args[++i];
+  else if (!name) name = a;
+  else { die(`unexpected argument: ${a}`); }
 }
-EOF
-chmod 600 "$dir/config.json"
+if (!name) die('usage: optchat-new-profile <name> [--provider P --model M] [--thinking LVL] [--force]');
+if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) die(`invalid profile name: ${name} (1-64 lowercase letters, digits, - or _, starting with a letter or digit)`);
+const thinking = flags.thinking ?? process.env.OPTCHAT_THINKING ?? 'medium';
+if (!THINKING.includes(thinking)) die(`invalid thinking level: ${thinking} (one of ${THINKING.join('|')})`);
 
-printf '# %s\n\nThis is the %s profile.\nAdd your personal instructions here.\n' "$name" "$name" > "$dir/AGENTS.md"
-chmod 600 "$dir/AGENTS.md"
+function die(msg) { console.error(`error: ${msg}`); process.exit(2); }
+function jsonRead(file) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; } }
 
-echo "created profile: $name"
-echo "  dir:       $dir"
-echo "  model:     $PROVIDER/$MODEL_ID ($THINKING) pinned for main/compactor/subagent"
-echo "  switch:    new session, first message: /optchat profile $name"
+// ---- model resolution ---------------------------------------------------------
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'));
+const modelsCfg = jsonRead(join(agentDir, 'models.json')) ?? {};
+const providers = modelsCfg.providers ?? {};
+
+function builtInLoggedIn(p) {
+  const auth = jsonRead(join(agentDir, 'auth.json')) ?? {};
+  return auth[p] !== undefined || process.env[ENV_KEYS[p] ?? ''] !== undefined;
+}
+async function served(baseUrl, modelId) {
+  if (!/^https?:/i.test(baseUrl ?? '')) return 'unknown'; // not probeable; accept
+  const url = `${baseUrl.replace(/\/+$/, '')}/models`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return 'unknown';
+    const body = await res.json();
+    const ids = (body.data ?? body ?? []).map(m => m.id);
+    return ids.includes(modelId) ? 'served' : 'absent';
+  } catch { return 'unknown'; } // offline at creation time; accept
+}
+async function detect() {
+  const candidates = [];
+  const settings = jsonRead(join(agentDir, 'settings.json')) ?? {};
+  if (settings.defaultProvider && settings.defaultModel)
+    candidates.push({ provider: settings.defaultProvider, model: settings.defaultModel, from: 'settings.json default' });
+  for (const [pid, p] of Object.entries(providers))
+    for (const m of (p.models ?? []).slice(0, 1))
+      candidates.push({ provider: pid, model: m.id, from: 'models.json' });
+  // Two passes: candidates confirmed reachable first, unprobeable ones only if nothing else works.
+  const unconfirmed = [];
+  for (const c of candidates) {
+    const p = providers[c.provider];
+    if (p) {
+      if (!(p.models ?? []).some(m => m.id === c.model)) { note(`${c.from}: ${c.provider}/${c.model} not in models.json — skipped`); continue; }
+      const state = await served(p.baseUrl, c.model);
+      if (state === 'absent') { note(`${c.from}: ${c.provider}/${c.model} is not served at ${p.baseUrl} — skipped`); continue; }
+      if (state === 'served') return { ...c, from: `${c.from} (probed: served)` };
+      if (/^https?:/i.test(p.baseUrl ?? '')) note(`${c.from}: could not probe ${p.baseUrl}; ${c.provider}/${c.model} kept as fallback`);
+      unconfirmed.push(c);
+      continue;
+    }
+    if (!builtInLoggedIn(c.provider)) { note(`${c.from}: built-in provider ${c.provider} has no login — skipped`); continue; }
+    return { ...c, from: `${c.from} (login found)` };
+  }
+  return unconfirmed[0];
+}
+
+// ---- main ----------------------------------------------------------------------
+async function main() {
+const explicitProvider = flags.provider ?? process.env.OPTCHAT_PROVIDER;
+const explicitModel = flags.model ?? process.env.OPTCHAT_MODEL;
+let choice, source;
+if (explicitProvider || explicitModel) {
+  if (!explicitProvider || !explicitModel) die('provider and model must be given together (--provider + --model or OPTCHAT_PROVIDER + OPTCHAT_MODEL)');
+  choice = { provider: explicitProvider, model: explicitModel }; source = 'explicit';
+} else if (process.env.PI_PROVIDER && process.env.PI_MODEL) {
+  choice = { provider: process.env.PI_PROVIDER, model: process.env.PI_MODEL }; source = 'current pi session model (PI_PROVIDER/PI_MODEL)';
+} else {
+  choice = await detect();
+  source = choice ? choice.from : undefined;
+  if (!choice) die('no usable model found. Add models to ' + join(agentDir, 'models.json') + ' / set the settings.json default, or pass --provider <id> --model <id>.');
+}
+
+// ---- create -------------------------------------------------------------------
+const home = resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
+const dir = join(home, 'profiles', name);
+const hasMemory = () => (existsSync(join(dir, 'main')) ? readdirSync(join(dir, 'main')).some(f => f.endsWith('.jsonl') && readFileSync(join(dir, 'main', f), 'utf8').trim() !== '') : false);
+
+if (existsSync(dir)) {
+  if (!force) die(`profile already exists: ${name} (${dir}) — use --force to reconfigure it (only allowed while it has no memory yet)`);
+  if (hasMemory()) die(`profile ${name} already has memory; refusing --force. Delete the directory if you really want a fresh one.`);
+}
+
+function atomicWrite(file, text) {
+  mkdirSync(resolve(file, '..'), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.tmp`;
+  const fd = openSync(temporary, 'w+', 0o600);
+  try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(temporary, file);
+}
+const pick = { provider: choice.provider, model: choice.model, thinking };
+const config = {
+  compactor: pick, subagent: pick,
+  subagentLevels: 1, maxAgents: 8, groupReports: false,
+  previousExchange: true, previousExchangeKB: 16, memorySearch: false,
+  summaryAcceptBytes: 640, jobs: 8, refreshAt: 0.3, main: pick,
+};
+mkdirSync(join(home, 'profiles'), { recursive: true, mode: 0o700 });
+mkdirSync(dir, { recursive: true, mode: 0o700 });
+atomicWrite(join(dir, 'config.json'), JSON.stringify(config, null, 2) + '\n');
+atomicWrite(join(dir, 'AGENTS.md'), `# ${name}\n\nThis is the ${name} profile.\nAdd your personal instructions here.\n`);
+
+console.log(`created profile: ${name}`);
+console.log(`  dir:       ${dir}`);
+console.log(`  model:     ${pick.provider}/${pick.model} (${pick.thinking}) — ${source}`);
+console.log(`  switch:    new session, first message: /optchat profile ${name}`);
+}
+
+main().catch((e) => { console.error(`error: ${e?.message ?? e}`); process.exit(1); });
