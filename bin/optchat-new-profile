@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Create a new pi-optchat profile wired to this machine's working local model.
+#
+# Usage: optchat-new-profile <name>
+#   name: 1-64 chars, lowercase letters/digits/-/_, starting with a letter/digit
+#
+# Environment overrides (defaults match the local vLLM on this machine):
+#   OPTCHAT_HOME     profile root            (default ~/.optchat)
+#   OPTCHAT_PROVIDER provider id             (default local-vllm1)
+#   OPTCHAT_MODEL    model id                (default /home/dash/models/Qwen3.8-27B-FP8)
+#   OPTCHAT_THINKING thinking level          (default medium)
+#
+# Writes <root>/profiles/<name>/config.json and AGENTS.md with the same layout
+# pi-optchat's own createProfile() uses, then pins main/compactor/subagent to
+# the local model so the profile works without a Pi model selection.
+set -euo pipefail
+
+OPTCHAT_HOME="${OPTCHAT_HOME:-$HOME/.optchat}"
+PROVIDER="${OPTCHAT_PROVIDER:-local-vllm1}"
+MODEL_ID="${OPTCHAT_MODEL:-/home/dash/models/Qwen3.8-27B-FP8}"
+THINKING="${OPTCHAT_THINKING:-medium}"
+
+name="${1:-}"
+if [[ -z "$name" ]]; then
+  echo "usage: optchat-new-profile <name>" >&2
+  exit 2
+fi
+if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
+  echo "invalid profile name: $name (1-64 lowercase letters, digits, - or _, starting with a letter or digit)" >&2
+  exit 2
+fi
+if [[ "$PROVIDER" == *\"* || "$MODEL_ID" == *\"* || "$THINKING" == *\"* ]]; then
+  echo "provider/model/thinking must not contain double quotes" >&2
+  exit 2
+fi
+
+dir="$OPTCHAT_HOME/profiles/$name"
+if [[ -e "$dir" ]]; then
+  echo "profile already exists: $name ($dir)" >&2
+  exit 1
+fi
+
+[[ -d "$OPTCHAT_HOME" ]] || mkdir -m 700 -p "$OPTCHAT_HOME"
+[[ -d "$OPTCHAT_HOME/profiles" ]] || mkdir -m 700 "$OPTCHAT_HOME/profiles"
+mkdir -m 700 "$dir"
+
+cat > "$dir/config.json" <<EOF
+{
+  "compactor": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" },
+  "subagent": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" },
+  "subagentLevels": 1,
+  "maxAgents": 8,
+  "groupReports": false,
+  "previousExchange": true,
+  "previousExchangeKB": 16,
+  "memorySearch": false,
+  "summaryAcceptBytes": 640,
+  "jobs": 8,
+  "refreshAt": 0.3,
+  "main": { "provider": "$PROVIDER", "model": "$MODEL_ID", "thinking": "$THINKING" }
+}
+EOF
+chmod 600 "$dir/config.json"
+
+printf '# %s\n\nThis is the %s profile.\nAdd your personal instructions here.\n' "$name" "$name" > "$dir/AGENTS.md"
+chmod 600 "$dir/AGENTS.md"
+
+echo "created profile: $name"
+echo "  dir:       $dir"
+echo "  model:     $PROVIDER/$MODEL_ID ($THINKING) pinned for main/compactor/subagent"
+echo "  switch:    new session, first message: /optchat profile $name"
